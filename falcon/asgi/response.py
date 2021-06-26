@@ -20,7 +20,7 @@ from inspect import iscoroutinefunction
 
 from falcon import response
 from falcon.constants import _UNSET
-from falcon.util.misc import is_python_func
+from falcon.util.misc import _encode_items_to_latin1, is_python_func
 
 __all__ = ['Response']
 
@@ -266,16 +266,14 @@ class Response(response.Response):
                         self.content_type = self.options.default_media_type
 
                     handler, serialize_sync, _ = self.options.media_handlers._resolve(
-                        self.content_type,
-                        self.options.default_media_type
+                        self.content_type, self.options.default_media_type
                     )
 
                     if serialize_sync:
                         self._media_rendered = serialize_sync(self._media)
                     else:
                         self._media_rendered = await handler.serialize_async(
-                            self._media,
-                            self.content_type
+                            self._media, self.content_type
                         )
 
                 data = self._media_rendered
@@ -415,15 +413,27 @@ class Response(response.Response):
             headers['content-type'] = media_type
 
         try:
-            items = [(n.encode('ascii'), v.encode('ascii')) for n, v in headers.items()]
+            # NOTE(vytas): Supporting ISO-8859-1 for historical reasons as per
+            #   RFC 7230, Section 3.2.4; and to strive for maximum
+            #   compatibility with WSGI.
+
+            # PERF(vytas): On CPython, _encode_items_to_latin1 is implemented
+            #   in Cython (with a pure Python fallback), where the resulting
+            #   C code speeds up the method substantially by directly invoking
+            #   CPython's C API functions such as PyUnicode_EncodeLatin1.
+            items = _encode_items_to_latin1(headers)
         except UnicodeEncodeError as ex:
+            # TODO(vytas): In 3.1.0, update this error message to highlight the
+            #   fact that we decided to allow ISO-8859-1?
             raise ValueError(
                 'The modern series of HTTP standards require that header names and values '
                 f'use only ASCII characters: {ex}'
             )
 
         if self._extra_headers:
-            items += [(n.encode('ascii'), v.encode('ascii')) for n, v in self._extra_headers]
+            items += [
+                (n.encode('ascii'), v.encode('ascii')) for n, v in self._extra_headers
+            ]
 
         # NOTE(kgriffs): It is important to append these after self._extra_headers
         #   in case the latter contains Set-Cookie headers that should be
@@ -437,6 +447,8 @@ class Response(response.Response):
             #
             # Even without the .split("\\r\\n"), the below
             # is still ~17% faster, so don't use .output()
-            items += [(b'set-cookie', c.OutputString().encode('ascii'))
-                      for c in self._cookies.values()]
+            items += [
+                (b'set-cookie', c.OutputString().encode('ascii'))
+                for c in self._cookies.values()
+            ]
         return items
